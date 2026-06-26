@@ -19,7 +19,7 @@ library(ggrepel)
 library(patchwork)
 library(tibble)
 library(vegan)       # Bray-Curtis + Mantel test
-library(umap)        # UMAP
+library(uwot)        # UMAP (支持预计算距离矩阵，替代umap包)
 library(Rtsne)       # t-SNE
 library(dendextend)  # 美化dendrogram
 library(compositions)
@@ -38,12 +38,8 @@ mutate  <- dplyr::mutate
 # conn_mat <- readRDS("your_conn_mat.rds")   # ← 替换为你的实际读入方式
 # conn_mat <- read.csv("your_conn_mat.csv", row.names = 1) %>% as.matrix()
 
-# ============================================================
-# 步骤 1: 构建226维特征向量 (afferent || efferent)
-# ============================================================
-# 对角线设为0 (不考虑自连接)
-diag(conn_mat) <- 0
-
+rownames(conn_mat) <- gsub("/",".",rownames(conn_mat))
+colnames(conn_mat) <- gsub("X","",colnames(conn_mat))
 # afferent: 某区域接收来自其他区域的输入 -> 取该区域所在的列向量
 # efferent: 某区域向其他区域的输出       -> 取该区域所在的行向量
 regions <- rownames(conn_mat)
@@ -88,96 +84,159 @@ dist_mat_clr <- as.matrix(dist_bc_clr)
 cat("Bray-Curtis dissimilarity matrix (FLN raw):", dim(dist_mat_raw), "\n")
 cat("Aitchison distance matrix (CLR):           ", dim(dist_mat_clr), "\n")
 
+
 # ============================================================
 # 步骤 4: 区域分组标签 (用于后续着色)
 # ============================================================
-# 根据你的区域命名体系定义分组，修改这里的逻辑即可
-get_region_group <- function(regions) {
-  case_when(
-    grepl("V1", regions)          ~ "V1",
-    grepl("V2", regions)          ~ "V2",
-    grepl("V3", regions)          ~ "V3",
-    grepl("V4|DLP", regions)      ~ "V4",
-    grepl("MT|FST|MST", regions)  ~ "Dorsal Stream",
-    grepl("TEO|TE|IT|Inf", regions) ~ "Ventral Stream",
-    grepl("LIP|VIP|MIP|7|PG", regions) ~ "Parietal",
-    grepl("F[1-7]|PMC|M1", regions)    ~ "Frontal Motor",
-    grepl("PFC|46|9|10|11|12|13|14|47", regions) ~ "PFC",
-    TRUE                          ~ "Other"
-  )
+# 精确命名映射表 (直接查找，不用正则)
+# 未匹配到的区域自动归为 "Other"
+region_category <- c(
+  # Somatosensory
+  "1" = "Somatosensory", "2" = "Somatosensory", "3" = "Somatosensory",
+  "SII" = "Somatosensory",
+  # Prefrontal
+  "10" = "Prefrontal", "11" = "Prefrontal", "12" = "Prefrontal",
+  "13" = "Prefrontal", "14" = "Prefrontal", "32" = "Prefrontal",
+  "44" = "Prefrontal", "45A" = "Prefrontal", "45B" = "Prefrontal",
+  "46d" = "Prefrontal", "46v" = "Prefrontal", "8B" = "Prefrontal",
+  "8l" = "Prefrontal", "8m" = "Prefrontal", "8r" = "Prefrontal",
+  "9" = "Prefrontal", "9.46d" = "Prefrontal", "9.46v" = "Prefrontal",
+  # Cingulate
+  "23" = "Cingulate", "24a" = "Cingulate", "24b" = "Cingulate","v23" = "Cingulate", 
+  "24c" = "Cingulate", "24d" = "Cingulate", "25" = "Cingulate",
+  # Paralimbic
+  "29.30" = "Paralimbic", "ENTO" = "Paralimbic", "POLE" = "Paralimbic",
+  # Association
+  "31" = "Association", "5" = "Association", "7A" = "Association",
+  "7B" = "Association", "7m" = "Association", "7op" = "Association",
+  "AIP" = "Association", "IPa" = "Association",
+  # Auditory
+  "CORE" = "Auditory", "LB" = "Auditory", "MB" = "Auditory",
+  "PBc" = "Auditory", "PBr" = "Auditory", "Pir" = "Auditory",
+  # Motor
+  "F1" = "Motor", "F2" = "Motor", "F3" = "Motor", "F4" = "Motor",
+  "F5" = "Motor", "F6" = "Motor", "F7" = "Motor", "ProM" = "Motor",
+  # Gustatory
+  "Gu" = "Gustatory",
+  # Insula
+  "INSULA" = "Insula", "OPAI" = "Insula", "OPRO" = "Insula", "Pi" = "Insula",
+  # Dorsal Stream
+  "DP" = "Dorsal Stream", "FST" = "Dorsal Stream", "LIP" = "Dorsal Stream",
+  "MIP" = "Dorsal Stream", "MST" = "Dorsal Stream", "MTc" = "Dorsal Stream",
+  "MTp" = "Dorsal Stream", "PGa" = "Dorsal Stream", "PIP" = "Dorsal Stream",
+  "STPc" = "Dorsal Stream", "STPi" = "Dorsal Stream", "STPr" = "Dorsal Stream",
+  "TPt" = "Dorsal Stream", "V3LF" = "Dorsal Stream", "V6" = "Dorsal Stream",
+  "V6A" = "Dorsal Stream", "VIP" = "Dorsal Stream", "V3A" = "Dorsal Stream",
+  # Ventral Stream
+  "PERI" = "Ventral Stream", "TEa.ma" = "Ventral Stream", "TEa.mp" = "Ventral Stream",
+  "TEad" = "Ventral Stream", "TEav" = "Ventral Stream", "TEO" = "Ventral Stream",
+  "TEOm" = "Ventral Stream", "TEpd" = "Ventral Stream", "TEpv" = "Ventral Stream",
+  "TH.TF" = "Ventral Stream", "V4Ac" = "Ventral Stream", "V4Apc" = "Ventral Stream",
+  "V4t" = "Ventral Stream",
+  # Retinotopic Subdivisions
+  "Pro.St." = "Retinotopic", "V1c" = "Retinotopic",
+  "V1cLF"  = "Retinotopic", "V1cUF"  = "Retinotopic",
+  "V1fpLF" = "Retinotopic", "V1fpUF" = "Retinotopic",
+  "V1pcLF" = "Retinotopic", "V1pcUF" = "Retinotopic",
+  "V2c"    = "Retinotopic",
+  "V2cLF"  = "Retinotopic", "V2cUF"  = "Retinotopic",
+  "V2fpLF" = "Retinotopic", "V2fpUF" = "Retinotopic",
+  "V2pcLF" = "Retinotopic", "V2pcUF" = "Retinotopic",
+  "V3c"    = "Retinotopic",
+  "V3cLF"  = "Retinotopic", "V3cUF"  = "Retinotopic",
+  "V3fpLF" = "Retinotopic", "V3fpUF" = "Retinotopic",
+  "V3pcLF" = "Retinotopic", "V3pcUF" = "Retinotopic",
+  "V4c"    = "Retinotopic",
+  "V4cLF"  = "Retinotopic", "V4cUF"  = "Retinotopic",
+  "V4fpLF" = "Retinotopic", "V4fpUF" = "Retinotopic","V4ApcUF" = "Retinotopic",
+  "V4pcLF" = "Retinotopic", "V4pcUF" = "Retinotopic",
+  "DLP"    = "Retinotopic", "DLPLF"  = "Retinotopic", "DLPUF"  = "Retinotopic"
+)
+ 
+# 精确查找分组，未命中的标为 "Other"，并打印出来便于检查
+region_group_vec <- region_category[regions]
+unmatched <- regions[is.na(region_group_vec)]
+if (length(unmatched) > 0) {
+  cat("以下区域未在 region_category 中找到匹配，归为 'Other':\n")
+  print(unmatched)
 }
-
+region_group_vec[is.na(region_group_vec)] <- "Other"
+ 
 region_df <- data.frame(
   Region = regions,
-  Group  = get_region_group(regions),
+  Group  = unname(region_group_vec),
   stringsAsFactors = FALSE
 )
-
+ 
+cat("\n区域分组分布:\n")
+print(sort(table(region_df$Group), decreasing = TRUE))
+ 
 group_colors <- c(
-  "V1"             = "#D9001B",
-  "V2"             = "#F07C74",
-  "V3"             = "#FAAD6C",
-  "V4"             = "#F5D76E",
-  "Dorsal Stream"  = "#76C376",
-  "Ventral Stream" = "#4A90C5",
-  "Parietal"       = "#2472B5",
-  "Frontal Motor"  = "#AD1F80",
-  "PFC"            = "#9B59B6",
-  "Other"          = "#AAAAAA"
+  "Retinotopic"   = "#D9001B",
+  "Dorsal Stream" = "#76C376",
+  "Ventral Stream"= "#4A90C5",
+  "Prefrontal"    = "#9B59B6",
+  "Motor"         = "#AD1F80",
+  "Cingulate"     = "#F07C74",
+  "Association"   = "#2472B5",
+  "Somatosensory" = "#FAAD6C",
+  "Auditory"      = "#F5D76E",
+  "Insula"        = "#1ABC9C",
+  "Paralimbic"    = "#E67E22",
+  "Gustatory"     = "#95A5A6",
+  "Other"         = "#AAAAAA"
 )
+ 
 
-# ============================================================
-# 步骤 5: UMAP (基于dissimilarity matrix)
-# ============================================================
+### umap 
+library(umap)
 run_umap <- function(dist_mat, label, seed = 42) {
   set.seed(seed)
-  umap_config <- umap.defaults
-  umap_config$input <- "dist"
-  umap_config$n_neighbors <- min(15, nrow(dist_mat) - 1)
-  umap_config$min_dist    <- 0.3
-  umap_config$metric      <- "precomputed"
-
-  umap_res <- umap(dist_mat, config = umap_config)
-  df <- data.frame(
-    Region = rownames(dist_mat),
+  mat <- as.matrix(dist_mat)
+  
+  cfg <- umap.defaults
+  cfg$input       <- "dist"
+  cfg$n_neighbors <- min(15, nrow(mat) - 1)
+  cfg$min_dist    <- 0.3
+  cfg$n_epochs    <- 500
+  cfg$random_state <- seed
+  
+  umap_res <- umap(mat, config = cfg)
+  
+  data.frame(
+    Region = rownames(mat),
     UMAP1  = umap_res$layout[, 1],
     UMAP2  = umap_res$layout[, 2]
   ) %>%
     left_join(region_df, by = "Region") %>%
     mutate(Method = label)
-  df
 }
-
-umap_raw <- run_umap(dist_mat_raw, "FLN Bray-Curtis")
-umap_clr <- run_umap(dist_mat_clr, "CLR Aitchison")
-
 plot_umap <- function(df, title) {
-  centroids <- df %>%
-    group_by(Group) %>%
-    summarise(UMAP1 = median(UMAP1), UMAP2 = median(UMAP2), .groups = "drop")
-
   ggplot(df, aes(UMAP1, UMAP2)) +
     geom_point(aes(color = Group, fill = Group), shape = 21, size = 3, alpha = 0.85, stroke = 0.3) +
     geom_text_repel(aes(label = Region), size = 2.5, max.overlaps = 30,
-                     segment.alpha = 0.3, segment.size = 0.3) +
+                    segment.alpha = 0.3, segment.size = 0.3) +
     scale_color_manual(values = group_colors, name = "Region Group") +
     scale_fill_manual(values = group_colors, name = "Region Group") +
     theme_void(base_family = "sans") +
     theme(
-      panel.border  = element_rect(color = "black", fill = NA, linewidth = 1),
-      plot.title    = element_text(hjust = 0.5, face = "bold", size = 14),
+      panel.border    = element_rect(color = "black", fill = NA, linewidth = 1),
+      plot.title      = element_text(hjust = 0.5, face = "bold", size = 14),
       legend.position = "right",
-      plot.margin   = margin(10, 10, 10, 10)
+      plot.margin     = margin(10, 10, 10, 10)
     ) +
     labs(title = title)
 }
-
+umap_raw <- run_umap(dist_mat_raw, "FLN Bray-Curtis")
+umap_clr <- run_umap(dist_mat_clr, "CLR Aitchison")
 p_umap_raw <- plot_umap(umap_raw, "UMAP: FLN Bray-Curtis dissimilarity")
 p_umap_clr <- plot_umap(umap_clr, "UMAP: CLR Aitchison distance")
-p_umap_compare <- p_umap_raw + p_umap_clr + plot_layout(guides = "collect") &
-  theme(legend.position = "right")
+p_umap_compare <- p_umap_raw + p_umap_clr +
+  plot_layout(guides = "collect") & theme(legend.position = "right")
 
-print(p_umap_compare)
+
+
+
 
 # ============================================================
 # 步骤 6: t-SNE (基于dissimilarity matrix)
@@ -239,6 +298,8 @@ run_hclust <- function(dist_obj, label, method = "ward.D2") {
 hc_raw <- run_hclust(dist_bc_raw, "FLN Bray-Curtis")
 hc_clr <- run_hclust(dist_bc_clr, "CLR Aitchison")
 
+
+
 plot_hclust <- function(hc_obj, region_df, title, n_cut = 8) {
   dend <- as.dendrogram(hc_obj$hc)
 
@@ -279,7 +340,8 @@ plot_hclust <- function(hc_obj, region_df, title, n_cut = 8) {
 
 out_dir <- "Dissimilarity_Analysis"
 dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
-
+out_dir <- "Dissimilarity_Analysis"
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 cluster_raw <- plot_hclust(hc_raw, region_df, "Hierarchical Clustering: FLN Bray-Curtis")
 cluster_clr <- plot_hclust(hc_clr, region_df, "Hierarchical Clustering: CLR Aitchison")
 
